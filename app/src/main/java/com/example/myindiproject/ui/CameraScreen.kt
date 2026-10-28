@@ -1,4 +1,3 @@
-
 package com.example.myindiproject.ui
 
 import android.Manifest
@@ -11,11 +10,26 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -23,18 +37,22 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.myindiproject.camera.BarcodeAnalyzer
-import com.example.myindiproject.data.ApiClient
-import com.example.myindiproject.data.Product
-import kotlinx.coroutines.launch
+import com.example.myindiproject.viewmodel.ProductUiState
+import com.example.myindiproject.viewmodel.ProductViewModel
 import java.util.concurrent.Executors
 
 @Composable
-fun CameraScreen() {
+fun CameraScreen(
+    productViewModel: ProductViewModel = viewModel(),
+    userAllergies: List<String> = emptyList()
+) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val state by productViewModel.state.collectAsState()
+    var lastScannedBarcode by remember { mutableStateOf<String?>(null) }
 
-    var hasPermission by remember {
+    var hasCameraPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
                 context,
@@ -43,174 +61,198 @@ fun CameraScreen() {
         )
     }
 
-    var barcode by remember { mutableStateOf<String?>(null) }
-    var product by remember { mutableStateOf<Product?>(null) }
-    var loading by remember { mutableStateOf(false) }
-
-    var message by remember {
-        mutableStateOf("Point the camera at a food barcode.")
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCameraPermission = granted
     }
 
-    val permissionLauncher =
-        rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.RequestPermission()
-        ) { granted ->
-            hasPermission = granted
-        }
-
-    fun lookupProduct(code: String) {
-        barcode = code
-        product = null
-        loading = true
-        message = "Looking up product..."
-
-        scope.launch {
-            try {
-                val response = ApiClient.api.getProduct(code)
-
-                if (response.status == 1 && response.product != null) {
-                    product = response.product
-                    message = "Product found."
-                } else {
-                    message = "Product not found in Open Food Facts."
-                }
-            } catch (e: Exception) {
-                Log.e("CameraScreen", "Product lookup failed", e)
-                message = "Could not load product. Check your internet connection."
-            } finally {
-                loading = false
+    when (val currentState = state) {
+        ProductUiState.Idle -> {
+            if (!hasCameraPermission) {
+                CameraPermissionScreen(
+                    onRequestPermission = {
+                        permissionLauncher.launch(Manifest.permission.CAMERA)
+                    }
+                )
+            } else {
+                ScanScreenContent(
+                    onBarcodeDetected = { barcode ->
+                        lastScannedBarcode = barcode
+                        productViewModel.loadProduct(barcode)
+                    }
+                )
             }
         }
-    }
 
+        ProductUiState.Loading -> {
+            StatusScreen(
+                title = "Even geduld…",
+                message = "We zoeken de productinformatie.",
+                showLoading = true
+            )
+        }
+
+        is ProductUiState.Success -> {
+            ProductScreen(
+                product = currentState.product,
+                userAllergies = userAllergies,
+                onBackToScan = productViewModel::reset
+            )
+        }
+
+        is ProductUiState.NotFound -> {
+            StatusScreen(
+                title = "Product niet gevonden",
+                message = "We hebben geen bruikbare informatie bij deze barcode. " +
+                        "Lees de verpakking.",
+                actionLabel = "Opnieuw scannen",
+                onAction = productViewModel::reset
+            )
+        }
+
+        is ProductUiState.Error -> {
+            StatusScreen(
+                title = "Geen verbinding",
+                message = currentState.message,
+                actionLabel = if (lastScannedBarcode != null) "Probeer opnieuw" else "Opnieuw scannen",
+                onAction = {
+                    val barcode = lastScannedBarcode
+                    if (barcode == null) {
+                        productViewModel.reset()
+                    } else {
+                        productViewModel.loadProduct(barcode)
+                    }
+                },
+                secondaryActionLabel = "Opnieuw scannen",
+                onSecondaryAction = productViewModel::reset
+            )
+        }
+    }
+}
+
+@Composable
+private fun CameraPermissionScreen(
+    onRequestPermission: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "Mag Goed Gezien de camera gebruiken?",
+            style = MaterialTheme.typography.headlineMedium
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Text(
+            text = "De camera is nodig om de barcode op uw product te lezen.",
+            style = MaterialTheme.typography.bodyLarge
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Button(onClick = onRequestPermission) {
+            Text("Camera toestaan")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "U kunt de barcode ook handmatig invoeren.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
+@Composable
+private fun ScanScreenContent(
+    onBarcodeDetected: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
             .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "Food Scanner",
+            text = "Scan een product",
             style = MaterialTheme.typography.headlineMedium
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Houd de barcode in het kader. De scan start vanzelf.",
+            style = MaterialTheme.typography.bodyLarge
         )
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (!hasPermission) {
-            Text(
-                text = "Allow camera access to scan food products.",
-                style = MaterialTheme.typography.bodyLarge
-            )
+        CameraPreview(
+            onBarcodeDetected = onBarcodeDetected,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(360.dp)
+        )
 
-            Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-            Button(
-                onClick = {
-                    permissionLauncher.launch(Manifest.permission.CAMERA)
-                }
-            ) {
-                Text("Allow camera")
-            }
-        } else if (barcode == null) {
-            Text(
-                text = "Hold the barcode in front of the camera.",
-                style = MaterialTheme.typography.bodyLarge
-            )
+        Text(
+            text = "Houd uw telefoon even stil.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
 
-            Spacer(modifier = Modifier.height(12.dp))
+@Composable
+private fun StatusScreen(
+    title: String,
+    message: String,
+    showLoading: Boolean = false,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+    secondaryActionLabel: String? = null,
+    onSecondaryAction: (() -> Unit)? = null
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineMedium
+        )
 
-            CameraPreview(
-                onBarcodeDetected = { code ->
-                    if (barcode == null && !loading) {
-                        lookupProduct(code)
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(320.dp)
-            )
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        if (loading) {
-            CircularProgressIndicator()
-            Spacer(modifier = Modifier.height(12.dp))
-        }
+        Spacer(modifier = Modifier.height(12.dp))
 
         Text(
             text = message,
-            style = MaterialTheme.typography.titleMedium
+            style = MaterialTheme.typography.bodyLarge
         )
 
-        barcode?.let { code ->
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Barcode: $code",
-                style = MaterialTheme.typography.bodyLarge
-            )
+        if (showLoading) {
+            Spacer(modifier = Modifier.height(20.dp))
+            CircularProgressIndicator()
         }
 
-        product?.let { item ->
+        if (actionLabel != null && onAction != null) {
             Spacer(modifier = Modifier.height(20.dp))
-
-            Text(
-                text = item.productName
-                    ?.takeIf { it.isNotBlank() }
-                    ?: "Product name unavailable",
-                style = MaterialTheme.typography.headlineSmall
-            )
-
-            item.brands
-                ?.takeIf { it.isNotBlank() }
-                ?.let { brand ->
-                    Text(
-                        text = "Brand: $brand",
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(
-                text = "Ingredients",
-                style = MaterialTheme.typography.titleLarge
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Text(
-                text = item.ingredients
-                    ?.takeIf { it.isNotBlank() }
-                    ?: "Ingredient information is unavailable.",
-                style = MaterialTheme.typography.bodyLarge
-            )
-        }
-
-        if (barcode != null) {
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Button(
-                onClick = {
-                    barcode = null
-                    product = null
-                    loading = false
-                    message = "Point the camera at a food barcode."
-                }
-            ) {
-                Text("Scan another product")
+            Button(onClick = onAction) {
+                Text(actionLabel)
             }
+        }
 
-            if (!loading && product == null) {
-                TextButton(
-                    onClick = {
-                        barcode?.let { lookupProduct(it) }
-                    }
-                ) {
-                    Text("Try again")
-                }
+        if (secondaryActionLabel != null && onSecondaryAction != null) {
+            TextButton(onClick = onSecondaryAction) {
+                Text(secondaryActionLabel)
             }
         }
     }
@@ -232,8 +274,7 @@ private fun CameraPreview(
 
     DisposableEffect(lifecycleOwner) {
         val cameraExecutor = Executors.newSingleThreadExecutor()
-        val cameraProviderFuture =
-            ProcessCameraProvider.getInstance(context)
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         var analyzer: BarcodeAnalyzer? = null
         var disposed = false
@@ -246,8 +287,8 @@ private fun CameraPreview(
 
                 val preview = Preview.Builder()
                     .build()
-                    .also {
-                        it.surfaceProvider = previewView.surfaceProvider
+                    .also { useCase ->
+                        useCase.surfaceProvider = previewView.surfaceProvider
                     }
 
                 val imageAnalysis = ImageAnalysis.Builder()
@@ -256,33 +297,26 @@ private fun CameraPreview(
                     )
                     .build()
 
-                val barcodeAnalyzer = BarcodeAnalyzer { code ->
+                val barcodeAnalyzer = BarcodeAnalyzer { barcode ->
                     ContextCompat.getMainExecutor(context).execute {
-                        onBarcodeDetected(code)
+                        if (!disposed) {
+                            onBarcodeDetected(barcode)
+                        }
                     }
                 }
 
                 analyzer = barcodeAnalyzer
-
-                imageAnalysis.setAnalyzer(
-                    cameraExecutor,
-                    barcodeAnalyzer
-                )
+                imageAnalysis.setAnalyzer(cameraExecutor, barcodeAnalyzer)
 
                 cameraProvider.unbindAll()
-
                 cameraProvider.bindToLifecycle(
                     lifecycleOwner,
                     CameraSelector.DEFAULT_BACK_CAMERA,
                     preview,
                     imageAnalysis
                 )
-            } catch (e: Exception) {
-                Log.e(
-                    "CameraPreview",
-                    "Failed to start camera",
-                    e
-                )
+            } catch (exception: Exception) {
+                Log.e("CameraPreview", "Failed to start camera", exception)
             }
         }, ContextCompat.getMainExecutor(context))
 
@@ -294,19 +328,17 @@ private fun CameraPreview(
             if (cameraProviderFuture.isDone) {
                 try {
                     cameraProviderFuture.get().unbindAll()
-                } catch (e: Exception) {
-                    Log.e(
-                        "CameraPreview",
-                        "Failed to stop camera",
-                        e
-                    )
+                } catch (exception: Exception) {
+                    Log.e("CameraPreview", "Failed to stop camera", exception)
                 }
             }
         }
     }
 
-    AndroidView(
-        factory = { previewView },
-        modifier = modifier
-    )
+    Box(modifier = modifier) {
+        AndroidView(
+            factory = { previewView },
+            modifier = Modifier.fillMaxSize()
+        )
+    }
 }

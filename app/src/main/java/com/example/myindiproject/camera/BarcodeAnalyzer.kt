@@ -5,7 +5,7 @@ import android.util.Log
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import com.google.mlkit.vision.barcode.Barcode
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
@@ -37,7 +37,9 @@ class BarcodeAnalyzer(
         scanner = BarcodeScanning.getClient(options)
     }
 
-    @OptIn(ExperimentalGetImage::class)
+    @androidx.annotation.OptIn(
+        androidx.camera.core.ExperimentalGetImage::class
+    )
     override fun analyze(imageProxy: ImageProxy) {
         if (!isProcessing.compareAndSet(false, true)) {
             imageProxy.close()
@@ -59,12 +61,13 @@ class BarcodeAnalyzer(
 
         scanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
-                val value = barcodes
-                    .firstNotNullOfOrNull { it.rawValue }
+                val code = barcodes.firstNotNullOfOrNull {
+                    it.rawValue
+                }
 
-                if (value != null && value != lastBarcode) {
-                    lastBarcode = value
-                    onBarcodeDetected(value)
+                if (code != null && code != lastBarcode) {
+                    lastBarcode = code
+                    onBarcodeDetected(code)
                 }
             }
             .addOnFailureListener { exception ->
